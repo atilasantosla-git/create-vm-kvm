@@ -3,7 +3,9 @@
 # CRIADOR INTERATIVO DE VMS KVM
 # Libvirt + virt-install + Kickstart
 # DHCP / IP estático por VM
-# SSH Key + relatório completo
+# Chave SSH exclusiva por VM
+# Repositórios Rocky Linux 9
+# Relatório completo
 # ============================================================
 
 set -Eeuo pipefail
@@ -14,6 +16,10 @@ DEFAULT_RAM=1024
 DEFAULT_CPU=1
 DEFAULT_DISK=20
 DEFAULT_OS_SEARCH="Rocky"
+
+# Repositórios usados no Kickstart para Rocky Linux 9.
+ROCKY_BASEOS_REPO="https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/"
+ROCKY_APPSTREAM_REPO="https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/"
 
 # ISO pode ser passada como primeiro argumento.
 ISO="${1:-${ISO:-$DEFAULT_ISO}}"
@@ -36,7 +42,7 @@ warn()    { echo -e "${YELLOW}[AVISO]${NC} $*"; }
 error()   { echo -e "${RED}[ERRO]${NC} $*" >&2; }
 
 # ------------------------------------------------------------
-# FUNCOES DE INTERACAO
+# FUNÇÕES DE INTERAÇÃO
 # ------------------------------------------------------------
 
 ask() {
@@ -131,7 +137,7 @@ make_hash() {
 }
 
 # ------------------------------------------------------------
-# VALIDACAO E CONVERSAO DE REDE
+# VALIDAÇÃO E CONVERSÃO DE REDE
 # ------------------------------------------------------------
 
 valid_ipv4() {
@@ -146,7 +152,6 @@ except ValueError:
 PY
 }
 
-# Aceita máscara em CIDR (24) ou formato tradicional (255.255.255.0).
 normalize_netmask() {
     python3 - "$1" <<'PY'
 import ipaddress
@@ -162,7 +167,7 @@ try:
         print(ipaddress.IPv4Network(f"0.0.0.0/{prefix}").netmask)
     else:
         mask = ipaddress.IPv4Address(value)
-        prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        ipaddress.IPv4Network(f"0.0.0.0/{mask}")
         print(mask)
 except ValueError:
     sys.exit(1)
@@ -216,39 +221,40 @@ setup_ssh_key() {
     fi
 
     SSH_KEY_DIR="$ssh_home/.ssh"
-    SSH_KEY="$SSH_KEY_DIR/kvm-lab_ed25519"
-    SSH_PUB_KEY="$SSH_KEY.pub"
-
     mkdir -p "$SSH_KEY_DIR"
     chmod 700 "$SSH_KEY_DIR"
+}
 
-    if [[ ! -f "$SSH_KEY" || ! -f "$SSH_PUB_KEY" ]]; then
-        info "Gerando chave SSH ED25519..."
+generate_vm_ssh_key() {
+    local index="$1"
+    local name="${VM_NAMES[$index]}"
+    local ssh_user="${SUDO_USER:-root}"
+
+    VM_SSH_KEY[$index]="$SSH_KEY_DIR/${name}_ed25519"
+    VM_SSH_PUB_KEY[$index]="${VM_SSH_KEY[$index]}.pub"
+
+    if [[ ! -f "${VM_SSH_KEY[$index]}" || ! -f "${VM_SSH_PUB_KEY[$index]}" ]]; then
+        info "Gerando chave SSH exclusiva para $name..."
 
         if [[ "$ssh_user" == "root" ]]; then
-            ssh-keygen -t ed25519 -N "" \
-                -C "kvm-lab" \
-                -f "$SSH_KEY"
+            ssh-keygen -t ed25519 -N "" -C "$name" -f "${VM_SSH_KEY[$index]}"
         else
-            sudo -u "$ssh_user" ssh-keygen \
-                -t ed25519 -N "" \
-                -C "kvm-lab" \
-                -f "$SSH_KEY"
+            sudo -u "$ssh_user" ssh-keygen -t ed25519 -N "" -C "$name" -f "${VM_SSH_KEY[$index]}"
         fi
 
-        success "Chave SSH criada."
+        success "Chave SSH criada para $name."
     else
-        info "Utilizando chave SSH existente: $SSH_KEY"
+        info "Utilizando chave SSH existente para $name: ${VM_SSH_KEY[$index]}"
     fi
 
-    chmod 600 "$SSH_KEY"
-    chmod 644 "$SSH_PUB_KEY"
+    chmod 600 "${VM_SSH_KEY[$index]}"
+    chmod 644 "${VM_SSH_PUB_KEY[$index]}"
 
-    SSH_PUBLIC_KEY=$(cat "$SSH_PUB_KEY")
+    VM_SSH_PUBLIC_KEY[$index]=$(cat "${VM_SSH_PUB_KEY[$index]}")
 }
 
 # ------------------------------------------------------------
-# SELECAO DO SISTEMA OPERACIONAL
+# SELEÇÃO DO SISTEMA OPERACIONAL
 # ------------------------------------------------------------
 
 select_os_variant() {
@@ -318,7 +324,7 @@ select_os_variant() {
 }
 
 # ------------------------------------------------------------
-# CONFIGURACAO DE REDE POR VM
+# CONFIGURAÇÃO DE REDE POR VM
 # ------------------------------------------------------------
 
 configure_network() {
@@ -333,6 +339,7 @@ configure_network() {
     while true; do
         echo "1) DHCP"
         echo "2) IP estático"
+
         ask "Escolha o tipo de configuração" "1"
         choice="$REPLY"
 
@@ -362,6 +369,7 @@ configure_network() {
         if valid_ipv4 "$ip"; then
             break
         fi
+
         warn "Endereço IPv4 inválido."
     done
 
@@ -372,6 +380,7 @@ configure_network() {
         if mask=$(normalize_netmask "$mask"); then
             break
         fi
+
         warn "Máscara inválida."
     done
 
@@ -382,6 +391,7 @@ configure_network() {
         if valid_ipv4 "$gateway"; then
             break
         fi
+
         warn "Gateway inválido."
     done
 
@@ -397,6 +407,7 @@ configure_network() {
         if validate_static_network "$ip" "$mask" "$gateway" "$dns"; then
             break
         fi
+
         warn "Dados de rede inválidos. Revise IP, máscara, gateway e DNS."
     done
 
@@ -407,7 +418,7 @@ configure_network() {
 }
 
 # ------------------------------------------------------------
-# VALIDACOES INICIAIS
+# VALIDAÇÕES INICIAIS
 # ------------------------------------------------------------
 
 if [[ $EUID -ne 0 ]]; then
@@ -472,6 +483,9 @@ declare -a VM_DISK_NAME=()
 declare -a VM_EXTRA_COUNT=()
 declare -a VM_CREATE_STATUS=()
 declare -a VM_SSH_COMMAND=()
+declare -a VM_SSH_KEY=()
+declare -a VM_SSH_PUB_KEY=()
+declare -a VM_SSH_PUBLIC_KEY=()
 
 declare -A VM_EXTRA_SIZE=()
 declare -A VM_EXTRA_NAME=()
@@ -483,7 +497,6 @@ echo "             CRIADOR DE VMS - KVM"
 echo "============================================================"
 echo "ISO: $ISO"
 echo "Diretório: $VM_DIR"
-echo "Chave SSH: $SSH_KEY"
 echo "Relatório: $REPORT_FILE"
 echo
 
@@ -527,6 +540,11 @@ for ((i=1; i<=VM_COUNT; i++)); do
         VM_NAMES+=("$VM_NAME")
         break
     done
+done
+
+# Gera um par de chaves exclusivo para cada VM.
+for ((i=0; i<VM_COUNT; i++)); do
+    generate_vm_ssh_key "$i"
 done
 
 # ------------------------------------------------------------
@@ -594,12 +612,12 @@ else
 fi
 
 # ------------------------------------------------------------
-# CONFIGURACAO DE REDE INDIVIDUAL
+# CONFIGURAÇÃO DE REDE INDIVIDUAL
 # ------------------------------------------------------------
 
 echo
 echo "============================================================"
-echo "CONFIGURACAO IP POR MAQUINA"
+echo "CONFIGURAÇÃO IP POR MÁQUINA"
 echo "============================================================"
 
 for ((i=0; i<VM_COUNT; i++)); do
@@ -612,7 +630,7 @@ done
 
 echo
 echo "============================================================"
-echo "CONFIGURACAO DOS DISCOS PRINCIPAIS"
+echo "CONFIGURAÇÃO DOS DISCOS PRINCIPAIS"
 echo "============================================================"
 
 if ask_yes_no "Mesmo tamanho de disco principal para todas as VMs?" "s"; then
@@ -708,20 +726,13 @@ for ((i=0; i<VM_COUNT; i++)); do
             fi
         done
 
-        for ((k=0; k<i; k++)); do
-            for ((m=1; m<=VM_EXTRA_COUNT[$k]; m++)); do
+        for ((k=0; k<VM_COUNT; k++)); do
+            for ((m=1; m<=${VM_EXTRA_COUNT[$k]:-0}; m++)); do
                 if [[ "${VM_EXTRA_NAME["$k:$m"]:-}" == "$extra_name" ]]; then
                     error "Nome de disco adicional duplicado."
                     exit 1
                 fi
             done
-        done
-
-        for ((m=1; m<j; m++)); do
-            if [[ "${VM_EXTRA_NAME["$i:$m"]:-}" == "$extra_name" ]]; then
-                error "Nome de disco adicional duplicado."
-                exit 1
-            fi
         done
 
         ask_number "Tamanho do disco adicional em GB" 10
@@ -735,12 +746,12 @@ for ((i=0; i<VM_COUNT; i++)); do
 done
 
 # ------------------------------------------------------------
-# CONFIGURACOES GLOBAIS OU INDIVIDUAIS
+# CONFIGURAÇÕES GLOBAIS OU INDIVIDUAIS
 # ------------------------------------------------------------
 
 echo
 echo "============================================================"
-echo "CONFIGURACAO DAS MAQUINAS"
+echo "CONFIGURAÇÃO DAS MÁQUINAS"
 echo "============================================================"
 
 if ask_yes_no "Mesmas configurações de CPU, RAM e SO para todas?" "s"; then
@@ -873,7 +884,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# RESUMO ANTES DA CRIACAO
+# RESUMO ANTES DA CRIAÇÃO
 # ------------------------------------------------------------
 
 echo
@@ -900,11 +911,13 @@ for ((i=0; i<VM_COUNT; i++)); do
     done
 
     echo "Usuário:        ${VM_USER[$i]:-(nenhum)}"
+    echo "Chave SSH privada: ${VM_SSH_KEY[$i]}"
+    echo "Chave SSH pública: ${VM_SSH_PUB_KEY[$i]}"
+    echo "Comentário da chave: ${VM_NAMES[$i]}"
 done
 
 echo
 echo "ISO: $ISO"
-echo "Chave SSH: $SSH_KEY"
 
 echo
 if ! ask_yes_no "Confirmar criação das VMs?" "n"; then
@@ -951,6 +964,13 @@ generate_kickstart() {
         echo "clearpart --all --initlabel --drives=vda"
         echo "autopart --type=lvm"
 
+        # Repositórios para Rocky Linux 9.
+        # Aplicados quando o os-variant selecionado é Rocky Linux 9.
+        if [[ "${VM_OS[$index]}" =~ rocky9|rocky-9|rocky_linux_9 ]]; then
+            echo "repo --name=Rocky-BaseOS --baseurl=${ROCKY_BASEOS_REPO}"
+            echo "repo --name=Rocky-AppStream --baseurl=${ROCKY_APPSTREAM_REPO}"
+        fi
+
         if [[ "${VM_ROOT_ENABLED[$index]}" == "yes" ]]; then
             echo "rootpw --iscrypted ${VM_ROOT_HASH[$index]}"
         else
@@ -964,7 +984,7 @@ generate_kickstart() {
                 echo "user --name=${VM_USER[$index]} --password=${VM_USER_HASH[$index]} --iscrypted"
             fi
 
-            echo "sshkey --username=${VM_USER[$index]} \"${SSH_PUBLIC_KEY}\""
+            echo "sshkey --username=${VM_USER[$index]} \"${VM_SSH_PUBLIC_KEY[$index]}\""
         fi
 
         echo "%packages"
@@ -995,12 +1015,12 @@ generate_kickstart() {
 }
 
 # ------------------------------------------------------------
-# CRIACAO DAS VMS
+# CRIAÇÃO DAS VMS
 # ------------------------------------------------------------
 
 echo
 echo "============================================================"
-echo "INICIANDO INSTALACOES"
+echo "INICIANDO INSTALAÇÕES"
 echo "============================================================"
 
 for ((i=0; i<VM_COUNT; i++)); do
@@ -1076,7 +1096,7 @@ for ((i=0; i<VM_COUNT; i++)); do
 done
 
 # ------------------------------------------------------------
-# RELATORIO
+# RELATÓRIO
 # ------------------------------------------------------------
 
 {
@@ -1089,8 +1109,6 @@ done
     echo "Libvirt URI: $(virsh uri 2>/dev/null || echo indisponível)"
     echo "ISO: $ISO"
     echo "Diretório das VMs: $VM_DIR"
-    echo "Chave SSH privada: $SSH_KEY"
-    echo "Chave SSH pública: $SSH_PUB_KEY"
     echo "Modo de configuração de CPU/RAM/SO: $CONFIG_MODE"
     echo "Quantidade de VMs solicitadas: $VM_COUNT"
     echo
@@ -1116,6 +1134,9 @@ done
         echo "Disco principal: $VM_DIR/${VM_DISK_NAME[$i]}"
         echo "Tamanho do disco principal: ${VM_DISK_SIZE[$i]} GB"
         echo "Usuário: ${VM_USER[$i]:-(nenhum)}"
+        echo "Chave SSH privada: ${VM_SSH_KEY[$i]}"
+        echo "Chave SSH pública: ${VM_SSH_PUB_KEY[$i]}"
+        echo "Comentário da chave: ${VM_NAMES[$i]}"
         echo "Root habilitado: ${VM_ROOT_ENABLED[$i]}"
         echo "Usuário no wheel: ${VM_WHEEL[$i]}"
         echo "Sudo NOPASSWD: ${VM_NOPASSWD[$i]}"
@@ -1127,8 +1148,9 @@ done
 
         if [[ "${VM_NET_MODE[$i]}" == "static" ]]; then
             echo "Comando SSH:"
+
             if [[ -n "${VM_USER[$i]}" ]]; then
-                printf 'ssh -i "%s" %s@%s\n' "$SSH_KEY" "${VM_USER[$i]}" "${VM_IP[$i]}"
+                printf 'ssh -i "%s" %s@%s\n' "${VM_SSH_KEY[$i]}" "${VM_USER[$i]}" "${VM_IP[$i]}"
             else
                 echo "Não disponível: usuário não configurado."
             fi
@@ -1140,19 +1162,13 @@ done
 
     echo
     echo "============================================================"
-    echo "CHAVE SSH PUBLICA"
-    echo "============================================================"
-    cat "$SSH_PUB_KEY"
-
-    echo
-    echo "============================================================"
     echo "ESTADO ATUAL DO LIBVIRT"
     echo "============================================================"
     virsh list --all
 
     echo
     echo "============================================================"
-    echo "OBSERVACOES"
+    echo "OBSERVAÇÕES"
     echo "============================================================"
     echo "O status acima representa a criação/inicialização pelo virt-install."
     echo "Não confirma que a instalação do sistema operacional terminou."
@@ -1161,7 +1177,7 @@ done
 } > "$REPORT_FILE"
 
 # ------------------------------------------------------------
-# SAIDA FINAL
+# SAÍDA FINAL
 # ------------------------------------------------------------
 
 echo
@@ -1189,14 +1205,16 @@ for ((i=0; i<VM_COUNT; i++)); do
         continue
     fi
 
+    echo "Chave privada: ${VM_SSH_KEY[$i]}"
+
     if [[ "${VM_NET_MODE[$i]}" == "static" ]]; then
-        printf 'ssh -i "%s" %s@%s\n' "$SSH_KEY" "${VM_USER[$i]}" "${VM_IP[$i]}"
+        printf 'ssh -i "%s" %s@%s\n' "${VM_SSH_KEY[$i]}" "${VM_USER[$i]}" "${VM_IP[$i]}"
     else
         echo "IP via DHCP. Consulte:"
         echo "virsh domifaddr ${VM_NAMES[$i]} --source lease"
         echo "ou:"
         echo "virsh net-dhcp-leases ${VM_NETWORK[$i]}"
-        printf 'ssh -i "%s" %s@IP_DA_VM\n' "$SSH_KEY" "${VM_USER[$i]}"
+        printf 'ssh -i "%s" %s@IP_DA_VM\n' "${VM_SSH_KEY[$i]}" "${VM_USER[$i]}"
     fi
 done
 
