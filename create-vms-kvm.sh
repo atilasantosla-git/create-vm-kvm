@@ -1109,8 +1109,9 @@ done
     echo "Libvirt URI: $(virsh uri 2>/dev/null || echo indisponível)"
     echo "ISO: $ISO"
     echo "Diretório das VMs: $VM_DIR"
-    echo "Modo de configuração de CPU/RAM/SO: $CONFIG_MODE"
-    echo "Quantidade de VMs solicitadas: $VM_COUNT"
+    echo "Modo de configuração: $CONFIG_MODE"
+    echo "Quantidade de VMs: $VM_COUNT"
+
     echo
     echo "============================================================"
     echo "DETALHES DAS MAQUINAS"
@@ -1121,42 +1122,59 @@ done
         echo "------------------------------------------------------------"
         echo "VM: ${VM_NAMES[$i]}"
         echo "------------------------------------------------------------"
-        echo "Status da criação: ${VM_CREATE_STATUS[$i]}"
-        echo "Sistema operacional (os-variant): ${VM_OS[$i]}"
+        echo "Status: ${VM_CREATE_STATUS[$i]}"
+        echo "Sistema: ${VM_OS[$i]}"
         echo "vCPUs: ${VM_CPU[$i]}"
         echo "RAM: ${VM_RAM[$i]} MB"
-        echo "Rede libvirt: ${VM_NETWORK[$i]}"
-        echo "Tipo de rede: ${VM_NET_MODE[$i]}"
+        echo "Rede: ${VM_NETWORK[$i]}"
+        echo "Tipo de IP: ${VM_NET_MODE[$i]}"
         echo "IP: ${VM_IP[$i]}"
         echo "Máscara: ${VM_MASK[$i]}"
         echo "Gateway: ${VM_GATEWAY[$i]}"
         echo "DNS: ${VM_DNS[$i]}"
         echo "Disco principal: $VM_DIR/${VM_DISK_NAME[$i]}"
-        echo "Tamanho do disco principal: ${VM_DISK_SIZE[$i]} GB"
+        echo "Tamanho: ${VM_DISK_SIZE[$i]} GB"
         echo "Usuário: ${VM_USER[$i]:-(nenhum)}"
-        echo "Chave SSH privada: ${VM_SSH_KEY[$i]}"
-        echo "Chave SSH pública: ${VM_SSH_PUB_KEY[$i]}"
-        echo "Comentário da chave: ${VM_NAMES[$i]}"
+        echo "Chave privada: ${VM_SSH_KEY[$i]}"
+        echo "Chave pública: ${VM_SSH_PUB_KEY[$i]}"
         echo "Root habilitado: ${VM_ROOT_ENABLED[$i]}"
-        echo "Usuário no wheel: ${VM_WHEEL[$i]}"
+        echo "Wheel: ${VM_WHEEL[$i]}"
         echo "Sudo NOPASSWD: ${VM_NOPASSWD[$i]}"
         echo "Discos adicionais: ${VM_EXTRA_COUNT[$i]}"
 
         for ((j=1; j<=VM_EXTRA_COUNT[$i]; j++)); do
             echo "  - ${VM_EXTRA_NAME["$i:$j"]}: ${VM_EXTRA_SIZE["$i:$j"]} GB"
         done
+    done
+
+    echo
+    echo "============================================================"
+    echo "COMANDOS DE ACESSO SSH"
+    echo "============================================================"
+
+    for ((i=0; i<VM_COUNT; i++)); do
+        echo
+        echo "VM: ${VM_NAMES[$i]}"
+
+        if [[ -z "${VM_USER[$i]}" ]]; then
+            echo "SSH indisponível: nenhum usuário configurado."
+            continue
+        fi
 
         if [[ "${VM_NET_MODE[$i]}" == "static" ]]; then
-            echo "Comando SSH:"
-
-            if [[ -n "${VM_USER[$i]}" ]]; then
-                printf 'ssh -i "%s" %s@%s\n' "${VM_SSH_KEY[$i]}" "${VM_USER[$i]}" "${VM_IP[$i]}"
-            else
-                echo "Não disponível: usuário não configurado."
-            fi
+            VM_SSH_COMMAND[$i]="ssh -i '${VM_SSH_KEY[$i]}' ${VM_USER[$i]}@${VM_IP[$i]}"
         else
-            echo "IP DHCP: consultar após a instalação."
-            echo "Comando SSH: consultar o IP atribuído pelo DHCP."
+            VM_SSH_COMMAND[$i]="ssh -i '${VM_SSH_KEY[$i]}' ${VM_USER[$i]}@IP_DA_VM"
+        fi
+
+        echo "Chave: ${VM_SSH_KEY[$i]}"
+        echo "Comando:"
+        echo "${VM_SSH_COMMAND[$i]}"
+
+        if [[ "${VM_NET_MODE[$i]}" == "dhcp" ]]; then
+            echo "Para descobrir o IP:"
+            echo "virsh domifaddr ${VM_NAMES[$i]} --source lease"
+            echo "virsh net-dhcp-leases ${VM_NETWORK[$i]}"
         fi
     done
 
@@ -1168,13 +1186,14 @@ done
 
     echo
     echo "============================================================"
-    echo "OBSERVAÇÕES"
+    echo "OBSERVACOES"
     echo "============================================================"
-    echo "O status acima representa a criação/inicialização pelo virt-install."
-    echo "Não confirma que a instalação do sistema operacional terminou."
-    echo "As VMs DHCP podem receber IP posteriormente."
-    echo "O acesso SSH depende da conclusão do Kickstart e da conectividade."
+    echo "O status não confirma a conclusão da instalação."
+    echo "O acesso SSH depende da conclusão do Kickstart."
+    echo "VMs DHCP precisam ter o IP descoberto após a instalação."
+
 } > "$REPORT_FILE"
+
 
 # ------------------------------------------------------------
 # SAÍDA FINAL
@@ -1207,18 +1226,20 @@ for ((i=0; i<VM_COUNT; i++)); do
 
     echo "Chave privada: ${VM_SSH_KEY[$i]}"
 
-    if [[ "${VM_NET_MODE[$i]}" == "static" ]]; then
-        printf 'ssh -i "%s" %s@%s\n' "${VM_SSH_KEY[$i]}" "${VM_USER[$i]}" "${VM_IP[$i]}"
+    if [[ -n "${VM_SSH_COMMAND[$i]:-}" ]]; then
+        echo "${VM_SSH_COMMAND[$i]}"
+    elif [[ "${VM_NET_MODE[$i]}" == "static" ]]; then
+        printf "ssh -i '%s' %s@%s\n" \
+            "${VM_SSH_KEY[$i]}" \
+            "${VM_USER[$i]}" \
+            "${VM_IP[$i]}"
     else
-        echo "IP via DHCP. Consulte:"
-        echo "virsh domifaddr ${VM_NAMES[$i]} --source lease"
-        echo "ou:"
-        echo "virsh net-dhcp-leases ${VM_NETWORK[$i]}"
-        printf 'ssh -i "%s" %s@IP_DA_VM\n' "${VM_SSH_KEY[$i]}" "${VM_USER[$i]}"
+        printf "ssh -i '%s' %s@IP_DA_VM\n" \
+            "${VM_SSH_KEY[$i]}" \
+            "${VM_USER[$i]}"
     fi
 done
 
 echo
-info "Relatório: $REPORT_FILE"
-info "Console: virsh console NOME-DA-VM"
-info "Para sair do console: Ctrl + ]"
+echo "Relatório completo:"
+echo "$REPORT_FILE"
